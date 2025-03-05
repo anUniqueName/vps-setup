@@ -64,18 +64,54 @@ cd /usr/local/bin/
 xray uuid | tee /tmp/uuid > /dev/null
 check_status "UUID generated successfully." "Failed to generate UUID."
 
-xray x25519 | tee /tmp/key > /dev/null
+# Generate and capture private/public key pair
+xray x25519 | tee /tmp/key 
 check_status "Private key generated successfully." "Failed to generate private key."
 
-# Read the generated UUID and private key
+# Read the generated UUID and keys
 UUID=$(cat /tmp/uuid)
-PRIVATE_KEY=$(grep -oP 'Private key: \K[a-zA-Z0-9]+' /tmp/key)
-PUBLIC_KEY=$(grep -oP 'Public key: \K[a-zA-Z0-9]+' /tmp/key)
 
-# Check if UUID and private key are empty
-if [ -z "$UUID" ] || [ -z "$PRIVATE_KEY" ]; then
-    error "Failed to extract UUID or private key."
+# Handle key output with more robust parsing
+KEY_OUTPUT=$(cat /tmp/key)
+PRIVATE_KEY=$(echo "$KEY_OUTPUT" | grep -o "Private key: [a-zA-Z0-9]*" | cut -d' ' -f3)
+PUBLIC_KEY=$(echo "$KEY_OUTPUT" | grep -o "Public key: [a-zA-Z0-9]*" | cut -d' ' -f3)
+
+# Log the raw key output for debugging
+log "Raw key output:"
+echo "$KEY_OUTPUT"
+
+# Check if UUID and keys are empty
+if [ -z "$UUID" ]; then
+    error "Failed to extract UUID."
     exit 1
+fi
+
+if [ -z "$PRIVATE_KEY" ]; then
+    error "Failed to extract private key."
+    exit 1
+fi
+
+if [ -z "$PUBLIC_KEY" ]; then
+    error "Failed to extract public key."
+    log "Attempting fallback method to generate public key..."
+    
+    # Alternative method to generate public key (if available)
+    if command -v xray &> /dev/null; then
+        # If no public key was found, regenerate the keypair
+        xray x25519 > /tmp/key_new
+        PUBLIC_KEY=$(cat /tmp/key_new | grep -o "Public key: [a-zA-Z0-9]*" | cut -d' ' -f3)
+        if [ -z "$PUBLIC_KEY" ]; then
+            error "Failed to generate public key using fallback method."
+            exit 1
+        else
+            log "Public key successfully generated using fallback method."
+            # Update private key too to keep the pair consistent
+            PRIVATE_KEY=$(cat /tmp/key_new | grep -o "Private key: [a-zA-Z0-9]*" | cut -d' ' -f3)
+        fi
+    else
+        error "Cannot generate public key - xray binary not available."
+        exit 1
+    fi
 fi
 
 # Step 3: Display the generated UUID and keys
