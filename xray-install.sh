@@ -68,17 +68,16 @@ check_status "UUID generated successfully." "Failed to generate UUID."
 xray x25519 | tee /tmp/key 
 check_status "Private key generated successfully." "Failed to generate private key."
 
-# Read the generated UUID and keys
+# Read the generated UUID
 UUID=$(cat /tmp/uuid)
 
-# Handle key output with more robust parsing
-KEY_OUTPUT=$(cat /tmp/key)
-PRIVATE_KEY=$(echo "$KEY_OUTPUT" | grep -o "Private key: [a-zA-Z0-9]*" | cut -d' ' -f3)
-PUBLIC_KEY=$(echo "$KEY_OUTPUT" | grep -o "Public key: [a-zA-Z0-9]*" | cut -d' ' -f3)
+# Extract keys using sed to handle special characters like dashes
+PRIVATE_KEY=$(sed -n 's/^Private key: //p' /tmp/key)
+PUBLIC_KEY=$(sed -n 's/^Public key: //p' /tmp/key)
 
 # Log the raw key output for debugging
 log "Raw key output:"
-echo "$KEY_OUTPUT"
+cat /tmp/key
 
 # Check if UUID and keys are empty
 if [ -z "$UUID" ]; then
