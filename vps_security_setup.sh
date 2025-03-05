@@ -61,7 +61,7 @@ check_required_tools() {
     
     local missing_tools=()
     
-    for tool in wget openssl sed grep findmnt ufw; do
+    for tool in wget openssl sed grep findmnt; do
         if ! command -v $tool &>/dev/null; then
             missing_tools+=("$tool")
         fi
@@ -69,6 +69,9 @@ check_required_tools() {
     
     if [ ${#missing_tools[@]} -gt 0 ]; then
         print_warning "Some required tools are missing. Installing them now..."
+        
+        # Disable interactive prompts for apt
+        export DEBIAN_FRONTEND=noninteractive
         
         apt-get update -y || {
             print_error "Failed to update package list. Network issues?"
@@ -218,7 +221,7 @@ collect_user_info() {
         fi
         
         # Check if port is already in use
-        if ss -tuln | grep -q ":$SSH_PORT "; then
+        if command -v ss &>/dev/null && ss -tuln | grep -q ":$SSH_PORT "; then
             print_warning "Port $SSH_PORT is already in use"
             read -p "Choose a different port? (y/n): " choice
             if [[ $choice =~ ^[Yy]$ ]]; then
@@ -236,6 +239,9 @@ collect_user_info() {
 fix_system_packages() {
     print_step "Fixing System Packages"
     
+    # Disable interactive prompts for apt
+    export DEBIAN_FRONTEND=noninteractive
+    
     print_info "Checking for broken packages..."
     if ! apt-get --fix-broken install -y; then
         handle_error "Failed to fix broken packages" "This might affect system updates" "non-fatal"
@@ -244,16 +250,41 @@ fix_system_packages() {
     fi
     
     print_info "Configuring pending packages..."
+    
+    # Handle btrfs hook issue proactively
+    if [ -f /usr/share/initramfs-tools/hooks/btrfs ]; then
+        # Check if btrfs is in use
+        if grep -q btrfs /etc/fstab || findmnt -t btrfs &>/dev/null; then
+            print_info "BTRFS filesystem detected, ensuring btrfs-progs is installed..."
+            apt-get install -y btrfs-progs
+        else
+            print_info "BTRFS not in use, temporarily disabling btrfs hook..."
+            mv /usr/share/initramfs-tools/hooks/btrfs /usr/share/initramfs-tools/hooks/btrfs.disabled
+            print_message "Disabled btrfs hook temporarily"
+        fi
+    fi
+    
+    # Configure pending packages
     if ! dpkg --configure -a; then
-        handle_error "Failed to configure pending packages" "This might affect system updates" "non-fatal"
+        print_warning "Some issues occurred while configuring packages"
+        print_info "This is non-fatal, continuing with script..."
     else
         print_message "All pending packages configured successfully"
+    fi
+    
+    # Restore btrfs hook if we disabled it
+    if [ -f /usr/share/initramfs-tools/hooks/btrfs.disabled ]; then
+        mv /usr/share/initramfs-tools/hooks/btrfs.disabled /usr/share/initramfs-tools/hooks/btrfs
+        print_message "Restored btrfs hook"
     fi
 }
 
 # Update system packages
 update_system() {
     print_step "Updating System Packages"
+    
+    # Disable interactive prompts for apt
+    export DEBIAN_FRONTEND=noninteractive
     
     print_info "Updating package lists..."
     if ! apt-get update -y; then
@@ -262,53 +293,58 @@ update_system() {
         print_message "Package lists updated successfully"
     fi
     
-    # Handle initramfs-tools issues proactively
+    # Fix potential initramfs-tools issues
     if dpkg -l | grep -q "initramfs-tools"; then
-        print_info "Checking initramfs-tools configuration..."
+        print_info "Ensuring initramfs-tools is properly configured..."
         
-        # Check if btrfs is in use
-        if grep -q btrfs /etc/fstab || findmnt -t btrfs &>/dev/null; then
-            print_info "BTRFS filesystem detected, ensuring btrfs-progs is installed..."
-            apt-get install -y btrfs-progs || {
-                handle_error "Failed to install btrfs-progs" "This might cause initramfs-tools to fail" "non-fatal"
-            }
-        else
-            print_info "BTRFS not in use, temporarily disabling btrfs hook if it exists..."
-            if [ -f /usr/share/initramfs-tools/hooks/btrfs ]; then
+        # Handle btrfs hook issue
+        if [ -f /usr/share/initramfs-tools/hooks/btrfs ]; then
+            # Check if btrfs is in use
+            if grep -q btrfs /etc/fstab || findmnt -t btrfs &>/dev/null; then
+                print_info "BTRFS filesystem detected, ensuring btrfs-progs is installed..."
+                apt-get install -y btrfs-progs
+            else
+                print_info "BTRFS not in use, temporarily disabling btrfs hook..."
                 mv /usr/share/initramfs-tools/hooks/btrfs /usr/share/initramfs-tools/hooks/btrfs.disabled
                 print_message "Disabled btrfs hook temporarily"
             fi
         fi
         
-        # Reinstall initramfs-tools to fix potential issues
+        # Reinstall initramfs-tools
         print_info "Reinstalling initramfs-tools package..."
-        if ! apt-get install --reinstall -y initramfs-tools; then
-            handle_error "Failed to reinstall initramfs-tools" "This might cause update issues" "non-fatal"
-        else
-            print_message "initramfs-tools reinstalled successfully"
-        fi
-        
-        # Update initramfs
-        print_info "Updating initramfs..."
-        if ! update-initramfs -u -k all; then
-            handle_error "Initramfs update failed" "System might still boot correctly, continuing with setup" "non-fatal"
-        else
-            print_message "Initramfs updated successfully"
-        fi
-        
-        # Restore btrfs hook if we disabled it
-        if [ -f /usr/share/initramfs-tools/hooks/btrfs.disabled ]; then
-            mv /usr/share/initramfs-tools/hooks/btrfs.disabled /usr/share/initramfs-tools/hooks/btrfs
-            print_message "Restored btrfs hook"
-        fi
+        apt-get install --reinstall -y initramfs-tools || {
+            print_warning "Failed to reinstall initramfs-tools. This is non-fatal."
+        }
     fi
     
     print_info "Upgrading packages..."
     if ! apt-get upgrade -y; then
-        handle_error "Some package upgrades failed" "Run 'sudo apt --fix-broken install' after this script completes" "non-fatal"
+        print_warning "Some package upgrades failed. This is non-fatal."
+        print_info "Attempting to fix broken packages..."
+        apt-get --fix-broken install -y
     else
         print_message "All packages upgraded successfully"
     fi
+    
+    # Try to install packages that were kept back
+    print_info "Checking for held back packages..."
+    held_back=$(apt-get upgrade -s | grep -c "kept back")
+    if [ "$held_back" -gt 0 ]; then
+        print_info "Found held back packages, attempting to install them..."
+        apt-get dist-upgrade -y || {
+            print_warning "Some held back packages could not be installed. This is non-fatal."
+        }
+    fi
+    
+    # Restore btrfs hook if we disabled it
+    if [ -f /usr/share/initramfs-tools/hooks/btrfs.disabled ]; then
+        mv /usr/share/initramfs-tools/hooks/btrfs.disabled /usr/share/initramfs-tools/hooks/btrfs
+        print_message "Restored btrfs hook"
+    fi
+    
+    # Run autoremove to clean up
+    print_info "Removing unnecessary packages..."
+    apt-get autoremove -y
 }
 
 # Create a new user
@@ -344,11 +380,11 @@ create_user() {
     
     # Verify sudo access
     print_info "Verifying sudo access..."
-    if ! sudo -l -U "$NEW_USERNAME" | grep -q "(ALL : ALL) ALL"; then
+    if ! groups "$NEW_USERNAME" | grep -q "\bsudo\b"; then
         print_warning "Could not verify sudo access for $NEW_USERNAME"
         print_info "You may need to configure sudo access manually"
     else
-        print_message "Sudo access verified for $NEW_USERNAME"
+        print_message "Sudo group membership verified for $NEW_USERNAME"
     fi
 }
 
@@ -361,7 +397,10 @@ configure_ssh() {
     
     # Check if SSH config exists
     if [ ! -f "$SSH_CONFIG" ]; then
-        handle_error "SSH configuration file not found" "Is SSH server installed?" "fatal"
+        print_info "SSH config not found. Installing OpenSSH server..."
+        apt-get install -y openssh-server || {
+            handle_error "Failed to install OpenSSH server" "SSH setup failed" "fatal"
+        }
     fi
     
     # Backup original config
@@ -379,26 +418,69 @@ configure_ssh() {
     if grep -q "^Port $SSH_PORT" "$SSH_CONFIG"; then
         print_info "SSH port $SSH_PORT is already configured"
     else
-        sed -i "s/^#*Port .*/Port $SSH_PORT/" "$SSH_CONFIG" || {
-            handle_error "Failed to update SSH port" "Reverting to backup" "non-fatal"
-            cp "$SSH_CONFIG_BACKUP" "$SSH_CONFIG"
+        # Update Port configuration
+        if grep -q "^Port " "$SSH_CONFIG"; then
+            # Port directive exists, update it
+            sed -i "s/^Port .*/Port $SSH_PORT/" "$SSH_CONFIG" || {
+                handle_error "Failed to update SSH port" "SSH configuration error" "non-fatal"
+            }
+        elif grep -q "^#Port " "$SSH_CONFIG"; then
+            # Port directive is commented, uncomment and update it
+            sed -i "s/^#Port .*/Port $SSH_PORT/" "$SSH_CONFIG" || {
+                handle_error "Failed to update SSH port" "SSH configuration error" "non-fatal"
+            }
+        else
+            # Port directive doesn't exist, add it
+            echo "Port $SSH_PORT" >> "$SSH_CONFIG" || {
+                handle_error "Failed to add SSH port" "SSH configuration error" "non-fatal"
+            }
+        fi
+    fi
+    
+    # Update PermitRootLogin - similar approach as Port
+    if grep -q "^PermitRootLogin " "$SSH_CONFIG"; then
+        sed -i "s/^PermitRootLogin .*/PermitRootLogin no/" "$SSH_CONFIG" || {
+            handle_error "Failed to disable root login" "SSH configuration error" "non-fatal"
+        }
+    elif grep -q "^#PermitRootLogin " "$SSH_CONFIG"; then
+        sed -i "s/^#PermitRootLogin .*/PermitRootLogin no/" "$SSH_CONFIG" || {
+            handle_error "Failed to disable root login" "SSH configuration error" "non-fatal"
+        }
+    else
+        echo "PermitRootLogin no" >> "$SSH_CONFIG" || {
+            handle_error "Failed to add root login config" "SSH configuration error" "non-fatal"
         }
     fi
     
-    # Disable root login
-    sed -i "s/^#*PermitRootLogin .*/PermitRootLogin no/" "$SSH_CONFIG" || {
-        handle_error "Failed to disable root login" "SSH configuration error" "non-fatal"
-    }
+    # Update PasswordAuthentication
+    if grep -q "^PasswordAuthentication " "$SSH_CONFIG"; then
+        sed -i "s/^PasswordAuthentication .*/PasswordAuthentication yes/" "$SSH_CONFIG" || {
+            handle_error "Failed to enable password authentication" "SSH configuration error" "non-fatal"
+        }
+    elif grep -q "^#PasswordAuthentication " "$SSH_CONFIG"; then
+        sed -i "s/^#PasswordAuthentication .*/PasswordAuthentication yes/" "$SSH_CONFIG" || {
+            handle_error "Failed to enable password authentication" "SSH configuration error" "non-fatal"
+        }
+    else
+        echo "PasswordAuthentication yes" >> "$SSH_CONFIG" || {
+            handle_error "Failed to add password authentication config" "SSH configuration error" "non-fatal"
+        }
+    fi
     
-    # Ensure password authentication is enabled
-    sed -i "s/^#*PasswordAuthentication .*/PasswordAuthentication yes/" "$SSH_CONFIG" || {
-        handle_error "Failed to enable password authentication" "SSH configuration error" "non-fatal"
-    }
-    
-    # Ensure pubkey authentication is enabled
-    sed -i "s/^#*PubkeyAuthentication .*/PubkeyAuthentication yes/" "$SSH_CONFIG" || {
-        handle_error "Failed to enable pubkey authentication" "SSH configuration error" "non-fatal"
-    }
+    # Update PubkeyAuthentication
+    if grep -q "^PubkeyAuthentication " "$SSH_CONFIG"; then
+        sed -i "s/^PubkeyAuthentication .*/PubkeyAuthentication yes/" "$SSH_CONFIG" || {
+            handle_error "Failed to enable pubkey authentication" "SSH configuration error" "non-fatal"
+        }
+    elif grep -q "^#PubkeyAuthentication " "$SSH_CONFIG"; then
+        sed -i "s/^#PubkeyAuthentication .*/PubkeyAuthentication yes/" "$SSH_CONFIG" || {
+            handle_error "Failed to enable pubkey authentication" "SSH configuration error" "non-fatal"
+        }
+    else
+        echo "PubkeyAuthentication yes" >> "$SSH_CONFIG" || {
+            handle_error "Failed to add pubkey authentication config" "SSH configuration error" "non-fatal"
+        }
+    fi
     
     print_message "SSH configuration updated:"
     print_message "  - Root login disabled"
@@ -408,7 +490,7 @@ configure_ssh() {
     
     # Validate SSH config
     print_info "Validating SSH configuration..."
-    if command -v sshd -t &>/dev/null; then
+    if command -v sshd &>/dev/null; then
         if ! sshd -t; then
             handle_error "SSH configuration is invalid" "Reverting to backup" "non-fatal"
             cp "$SSH_CONFIG_BACKUP" "$SSH_CONFIG"
@@ -417,18 +499,36 @@ configure_ssh() {
             print_message "SSH configuration is valid"
         fi
     else
-        print_warning "Could not validate SSH configuration (sshd -t not available)"
+        print_warning "Could not validate SSH configuration (sshd command not available)"
     fi
     
     # Restart SSH service
     print_info "Restarting SSH service..."
-    if ! systemctl restart ssh; then
-        handle_error "Failed to restart SSH service" "Reverting to backup" "non-fatal"
-        cp "$SSH_CONFIG_BACKUP" "$SSH_CONFIG"
-        systemctl restart ssh
-        print_warning "Reverted to original SSH configuration"
+    if systemctl is-active ssh &>/dev/null; then
+        if ! systemctl restart ssh; then
+            handle_error "Failed to restart SSH service" "Reverting to backup" "non-fatal"
+            cp "$SSH_CONFIG_BACKUP" "$SSH_CONFIG"
+            systemctl restart ssh || {
+                print_error "Failed to restart SSH service with original configuration"
+                print_warning "Please restore SSH manually: cp $SSH_CONFIG_BACKUP $SSH_CONFIG"
+            }
+        else
+            print_message "SSH service restarted successfully"
+        fi
+    elif systemctl is-active sshd &>/dev/null; then
+        if ! systemctl restart sshd; then
+            handle_error "Failed to restart SSH service" "Reverting to backup" "non-fatal"
+            cp "$SSH_CONFIG_BACKUP" "$SSH_CONFIG"
+            systemctl restart sshd || {
+                print_error "Failed to restart SSH service with original configuration"
+                print_warning "Please restore SSH manually: cp $SSH_CONFIG_BACKUP $SSH_CONFIG"
+            }
+        else
+            print_message "SSH service restarted successfully"
+        fi
     else
-        print_message "SSH service restarted successfully"
+        print_warning "SSH service not found, please start it manually"
+        print_info "Try: systemctl start ssh"
     fi
 }
 
@@ -501,77 +601,6 @@ configure_firewall() {
     ufw status verbose
 }
 
-# Add SSH key authentication
-setup_ssh_key() {
-    print_step "Setting Up SSH Key Authentication (Optional)"
-    
-    read -p "Do you want to set up SSH key authentication? (y/n): " choice
-    if [[ ! $choice =~ ^[Yy]$ ]]; then
-        print_info "Skipping SSH key setup"
-        return 0
-    fi
-    
-    # Create .ssh directory for the new user
-    USER_HOME=$(eval echo ~$NEW_USERNAME)
-    SSH_DIR="$USER_HOME/.ssh"
-    
-    print_info "Setting up SSH directory for $NEW_USERNAME..."
-    
-    if [ ! -d "$SSH_DIR" ]; then
-        if ! mkdir -p "$SSH_DIR"; then
-            handle_error "Failed to create SSH directory" "SSH key setup failed" "non-fatal"
-            return 1
-        fi
-    fi
-    
-    # Create authorized_keys file if it doesn't exist
-    if [ ! -f "$SSH_DIR/authorized_keys" ]; then
-        if ! touch "$SSH_DIR/authorized_keys"; then
-            handle_error "Failed to create authorized_keys file" "SSH key setup failed" "non-fatal"
-            return 1
-        fi
-    fi
-    
-    # Set correct permissions
-    chmod 700 "$SSH_DIR"
-    chmod 600 "$SSH_DIR/authorized_keys"
-    chown -R "$NEW_USERNAME:$NEW_USERNAME" "$SSH_DIR"
-    
-    print_info "Enter your public SSH key (paste and press Enter, then Ctrl+D):"
-    SSH_KEY=$(cat)
-    
-    if [[ -z "$SSH_KEY" ]]; then
-        print_warning "No SSH key provided"
-        print_info "You can add a key later by adding it to $SSH_DIR/authorized_keys"
-        return 0
-    fi
-    
-    # Add key to authorized_keys
-    if ! echo "$SSH_KEY" >> "$SSH_DIR/authorized_keys"; then
-        handle_error "Failed to add SSH key" "SSH key setup failed" "non-fatal"
-        return 1
-    else
-        print_message "SSH key added successfully"
-    fi
-    
-    # Ask about disabling password authentication
-    read -p "Do you want to disable password authentication (recommended)? (y/n): " choice
-    if [[ $choice =~ ^[Yy]$ ]]; then
-        print_info "Disabling password authentication..."
-        sed -i "s/^#*PasswordAuthentication .*/PasswordAuthentication no/" "$SSH_CONFIG"
-        
-        # Restart SSH service
-        if ! systemctl restart ssh; then
-            handle_error "Failed to restart SSH service" "Configuration not applied" "non-fatal"
-            sed -i "s/^#*PasswordAuthentication .*/PasswordAuthentication yes/" "$SSH_CONFIG"
-            systemctl restart ssh
-            print_warning "Reverted to password authentication"
-        else
-            print_message "Password authentication disabled successfully"
-        fi
-    fi
-}
-
 # Summary and final steps
 show_summary() {
     print_step "Setup Summary"
@@ -586,8 +615,11 @@ show_summary() {
     fi
     echo "SSH Port: $SSH_PORT"
     
-    echo -e "\n${BOLD}FIREWALL RULES${NC}"
-    ufw status numbered | grep -v "Status"
+    # Check firewall status
+    if command -v ufw &>/dev/null && ufw status | grep -q "Status: active"; then
+        echo -e "\n${BOLD}FIREWALL RULES${NC}"
+        ufw status | grep -v "Status"
+    fi
     
     echo -e "\n${BOLD}NEXT STEPS${NC}"
     echo "1. Log in with the new user: ssh $NEW_USERNAME@your_server_ip -p $SSH_PORT"
@@ -597,10 +629,6 @@ show_summary() {
         print_warning "A system reboot is recommended to complete all updates"
         echo "   Run: sudo reboot"
     fi
-    
-    print_warning "If you encounter any system update issues after this script, run:"
-    echo "   sudo apt --fix-broken install"
-    echo "   sudo dpkg --configure -a"
     
     echo -e "${BOLD}==============================================${NC}"
     print_info "Log file saved to: $LOG_FILE"
@@ -617,7 +645,6 @@ main() {
     create_user
     configure_ssh
     configure_firewall
-    setup_ssh_key
     show_summary
     
     print_info "Script completed at: $(date)"
