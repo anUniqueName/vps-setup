@@ -248,7 +248,18 @@ fi
 
 # Generate VLESS URL
 SERVER_IP=$(curl -s ifconfig.me)
-REMARK=$(hostname)-$(date +%m%d)
+# REMARK=$(hostname)-$(date +%m%d)
+DEFAULT_REMARK=$(hostname)-$(date +%m%d)
+echo -e "${BLUE}Enter a custom remark name for your VLESS configuration${NC}"
+echo -e "${YELLOW}(Press Enter to use default: $DEFAULT_REMARK)${NC}: "
+read USER_REMARK
+if [ -z "$USER_REMARK" ]; then
+    REMARK="$DEFAULT_REMARK"
+    log "Using default remark: $REMARK"
+else
+    REMARK="$USER_REMARK"
+    log "Using custom remark: $REMARK"
+fi
 
 # URL encode the remark
 ENCODED_REMARK=$(echo -n "$REMARK" | xxd -plain | tr -d '\n' | sed 's/\(..\)/%\1/g')
