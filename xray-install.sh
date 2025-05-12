@@ -249,22 +249,15 @@ fi
 # Generate VLESS URL
 SERVER_IP=$(curl -s ifconfig.me)
 # REMARK=$(hostname)-$(date +%m%d)
-# 生成默认备注名
+# 生成默认备注名并获取用户输入
 DEFAULT_REMARK=$(hostname)-$(date +%m%d)
-
-# 询问用户是否要自定义备注名
 echo -e "${BLUE}Enter a custom remark name for your VLESS configuration${NC}"
 echo -e "${YELLOW}(Press Enter to use default: $DEFAULT_REMARK)${NC}: "
 read USER_REMARK
 
-# 检查用户输入并设置REMARK变量
-if [ -z "$USER_REMARK" ]; then
-    REMARK="$DEFAULT_REMARK"
-    log "Using default remark: $REMARK"
-else
-    REMARK="$USER_REMARK"
-    log "Using custom remark: $REMARK"
-fi
+# 使用默认值或用户输入
+REMARK=${USER_REMARK:-$DEFAULT_REMARK}
+log "Using remark: $REMARK"
 
 # URL encode the remark
 ENCODED_REMARK=$(echo -n "$REMARK" | xxd -plain | tr -d '\n' | sed 's/\(..\)/%\1/g')
