@@ -402,6 +402,25 @@ configure_ssh() {
             handle_error "Failed to install OpenSSH server" "SSH setup failed" "fatal"
         }
     fi
+
+    # 新增：确保SSH服务相关目录存在
+    print_info "Ensuring SSH directories exist..."
+    if [ ! -d "/run/sshd" ]; then
+        print_info "Creating /run/sshd directory..."
+        mkdir -p /run/sshd
+        chown root:root /run/sshd
+        chmod 755 /run/sshd
+        print_message "Created /run/sshd directory"
+    fi
+    
+    # 新增：确保SSH服务正在运行
+    print_info "Ensuring SSH service is running..."
+    if ! systemctl is-active --quiet ssh && ! systemctl is-active --quiet sshd; then
+        print_info "Starting SSH service..."
+        systemctl start ssh || systemctl start sshd || {
+            print_warning "Could not start SSH service, but continuing..."
+        }
+    fi
     
     # Backup original config
     print_info "Backing up SSH configuration..."
