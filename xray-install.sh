@@ -71,9 +71,9 @@ check_status "Private key generated successfully." "Failed to generate private k
 # Read the generated UUID
 UUID=$(cat /tmp/uuid)
 
-# Extract keys using sed to handle special characters like dashes
-PRIVATE_KEY=$(sed -n 's/^Private key: //p' /tmp/key)
-PUBLIC_KEY=$(sed -n 's/^Public key: //p' /tmp/key)
+# Extract keys - Note: New XRay format uses "PrivateKey:" and "Password:" (not "Private key:" and "Public key:")
+PRIVATE_KEY=$(sed -n 's/^PrivateKey: //p' /tmp/key | tr -d '\n\r')
+PUBLIC_KEY=$(sed -n 's/^Password: //p' /tmp/key | tr -d '\n\r')
 
 # Log the raw key output for debugging
 log "Raw key output:"
@@ -87,42 +87,45 @@ fi
 
 if [ -z "$PRIVATE_KEY" ]; then
     error "Failed to extract private key."
-    exit 1
+    log "Attempting fallback method to generate private key..."
+    
+    # Alternative method to extract private key
+    if command -v xray &> /dev/null; then
+        # If no private key was found, regenerate the keypair
+        xray x25519 > /tmp/key_new
+        PRIVATE_KEY=$(grep "PrivateKey:" /tmp/key_new | cut -d' ' -f2 | tr -d '\n\r')
+        PUBLIC_KEY=$(grep "Password:" /tmp/key_new | cut -d' ' -f2 | tr -d '\n\r')
+        
+        if [ -z "$PRIVATE_KEY" ] || [ -z "$PUBLIC_KEY" ]; then
+            error "Failed to generate keys using fallback method."
+            exit 1
+        else
+            log "Keys successfully generated using fallback method."
+        fi
+    else
+        error "Cannot generate keys - xray binary not available."
+        exit 1
+    fi
 fi
 
 if [ -z "$PUBLIC_KEY" ]; then
-    error "Failed to extract public key."
-    log "Attempting fallback method to generate public key..."
-    
-    # Alternative method to generate public key (if available)
-    if command -v xray &> /dev/null; then
-        # If no public key was found, regenerate the keypair
-        xray x25519 > /tmp/key_new
-        PUBLIC_KEY=$(cat /tmp/key_new | grep -o "Public key: [a-zA-Z0-9]*" | cut -d' ' -f3)
-        if [ -z "$PUBLIC_KEY" ]; then
-            error "Failed to generate public key using fallback method."
-            exit 1
-        else
-            log "Public key successfully generated using fallback method."
-            # Update private key too to keep the pair consistent
-            PRIVATE_KEY=$(cat /tmp/key_new | grep -o "Private key: [a-zA-Z0-9]*" | cut -d' ' -f3)
-        fi
-    else
-        error "Cannot generate public key - xray binary not available."
-        exit 1
-    fi
+    error "Failed to extract public key (Password field)."
+    exit 1
 fi
 
 # Step 3: Display the generated UUID and keys
 log "Generated keys:"
 echo "UUID: $UUID"
 echo "Private Key: $PRIVATE_KEY"
-echo "Public Key: $PUBLIC_KEY"
+echo "Public Key (Password): $PUBLIC_KEY"
 
 # Step 4: Create XRay configuration
 log "Creating XRay configuration..."
 CONFIG_DIR="/usr/local/etc/xray"
 CONFIG_FILE="$CONFIG_DIR/config.json"
+
+# Create log directory if it doesn't exist
+mkdir -p /var/log/xray
 
 # Backup existing config if it exists
 if [ -f "$CONFIG_FILE" ]; then
@@ -248,7 +251,6 @@ fi
 
 # Generate VLESS URL
 SERVER_IP=$(curl -s ifconfig.me)
-# REMARK=$(hostname)-$(date +%m%d)
 # 生成默认备注名并获取用户输入
 DEFAULT_REMARK=$(hostname)-$(date +%m%d)
 echo -e "${BLUE}Enter a custom remark name for your VLESS configuration${NC}"
