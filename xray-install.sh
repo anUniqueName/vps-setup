@@ -73,8 +73,7 @@ UUID=$(cat /tmp/uuid)
 
 # Extract keys - Note: New XRay format uses "PrivateKey:" and "Password:" (not "Private key:" and "Public key:")
 PRIVATE_KEY=$(sed -n 's/^PrivateKey: //p' /tmp/key | tr -d '\n\r')
-PUBLIC_KEY=$(sed -n 's/^Password: //p' /tmp/key | tr -d '\n\r')
-
+PUBLIC_KEY=$(grep -iE "Public|Password" /tmp/key | awk -F': ' '{print $2}' | tr -d '\n\r ')
 # Log the raw key output for debugging
 log "Raw key output:"
 cat /tmp/key
