@@ -1,304 +1,232 @@
-#!/bin/bash
+#!/usr/bin/env bash
+# Debian/Ubuntu + systemd. Run as a saved file, not via a pipe.
+set -Eeuo pipefail
+umask 077
 
-# Colors for better readability
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[0;33m'
-BLUE='\033[0;34m'
-NC='\033[0m' # No Color
-
-# Function to display status messages
-log() {
-    echo -e "${BLUE}[INFO]${NC} $1"
+log() { printf '\033[0;34m[INFO]\033[0m %s\n' "$*"; }
+warning() { printf '\033[0;33m[WARN]\033[0m %s\n' "$*" >&2; }
+die() { printf '\033[0;31m[ERROR]\033[0m %s\n' "$*" >&2; exit 1; }
+urlencode() { printf '%s' "$1" | od -An -tx1 | tr -d ' \n' | sed 's/../%&/g'; }
+valid_domain() {
+    local label
+    [[ ${#1} -le 253 && "$1" == *.* && "$1" != *..* && "$1" != *. ]] || return 1
+    local -a labels
+    IFS=. read -r -a labels <<< "$1"
+    for label in "${labels[@]}"; do
+        [[ ${#label} -le 63 && "$label" =~ ^[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?$ ]] || return 1
+    done
+    [[ ! "$1" =~ ^[0-9.]+$ ]]
 }
+valid_path() { [[ "$1" =~ ^/[a-zA-Z0-9/_-]+$ ]]; }
 
-# Function to display success messages
-success() {
-    echo -e "${GREEN}[SUCCESS]${NC} $1"
-}
-
-# Function to display error messages
-error() {
-    echo -e "${RED}[ERROR]${NC} $1"
-}
-
-# Function to display warning messages
-warning() {
-    echo -e "${YELLOW}[WARNING]${NC} $1"
-}
-
-# Function to check command execution status
-check_status() {
-    if [ $? -eq 0 ]; then
-        success "$1"
-    else
-        error "$2"
-        exit 1
-    fi
-}
-
-# Check if script is run as root
-if [ "$(id -u)" -ne 0 ]; then
-    error "This script must be run as root or with sudo privileges."
-    exit 1
-fi
-
-# Check required dependencies
-log "Checking required dependencies..."
-for cmd in curl vim xxd; do
-    if ! command -v $cmd &> /dev/null; then
-        warning "$cmd is not installed. Installing..."
-        apt-get update && apt-get install -y $cmd
-        check_status "$cmd installed successfully." "Failed to install $cmd."
-    fi
-done
-
-# Step 1: Install XRay using the latest version
-log "Installing XRay with the latest version..."
-bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install
-check_status "XRay installed successfully." "Failed to install XRay."
-
-# Step 2: Generate UUID and private key
-log "Generating UUID and private key..."
-cd /usr/local/bin/
-xray uuid | tee /tmp/uuid > /dev/null
-check_status "UUID generated successfully." "Failed to generate UUID."
-
-# Generate and capture private/public key pair
-xray x25519 | tee /tmp/key 
-check_status "Private key generated successfully." "Failed to generate private key."
-
-# Read the generated UUID
-UUID=$(cat /tmp/uuid)
-
-# Extract keys - Note: New XRay format uses "PrivateKey:" and "Password:" (not "Private key:" and "Public key:")
-PRIVATE_KEY=$(sed -n 's/^PrivateKey: //p' /tmp/key | tr -d '\n\r')
-PUBLIC_KEY=$(grep -iE "Public|Password" /tmp/key | awk -F': ' '{print $2}' | tr -d '\n\r ')
-# Log the raw key output for debugging
-log "Raw key output:"
-cat /tmp/key
-
-# Check if UUID and keys are empty
-if [ -z "$UUID" ]; then
-    error "Failed to extract UUID."
-    exit 1
-fi
-
-if [ -z "$PRIVATE_KEY" ]; then
-    error "Failed to extract private key."
-    log "Attempting fallback method to generate private key..."
-    
-    # Alternative method to extract private key
-    if command -v xray &> /dev/null; then
-        # If no private key was found, regenerate the keypair
-        xray x25519 > /tmp/key_new
-        PRIVATE_KEY=$(grep "PrivateKey:" /tmp/key_new | cut -d' ' -f2 | tr -d '\n\r')
-        PUBLIC_KEY=$(grep "Password:" /tmp/key_new | cut -d' ' -f2 | tr -d '\n\r')
-        
-        if [ -z "$PRIVATE_KEY" ] || [ -z "$PUBLIC_KEY" ]; then
-            error "Failed to generate keys using fallback method."
-            exit 1
-        else
-            log "Keys successfully generated using fallback method."
-        fi
-    else
-        error "Cannot generate keys - xray binary not available."
-        exit 1
-    fi
-fi
-
-if [ -z "$PUBLIC_KEY" ]; then
-    error "Failed to extract public key (Password field)."
-    exit 1
-fi
-
-# Step 3: Display the generated UUID and keys
-log "Generated keys:"
-echo "UUID: $UUID"
-echo "Private Key: $PRIVATE_KEY"
-echo "Public Key (Password): $PUBLIC_KEY"
-
-# Step 4: Create XRay configuration
-log "Creating XRay configuration..."
-CONFIG_DIR="/usr/local/etc/xray"
-CONFIG_FILE="$CONFIG_DIR/config.json"
-
-# Create log directory if it doesn't exist
-mkdir -p /var/log/xray
-
-# Backup existing config if it exists
-if [ -f "$CONFIG_FILE" ]; then
-    mv "$CONFIG_FILE" "${CONFIG_FILE}.backup-$(date +%Y%m%d%H%M%S)"
-    warning "Existing configuration backed up."
-fi
-
-# Create the new configuration file
-cat > "$CONFIG_FILE" << EOF
-{
-    "log": {
-        "loglevel": "debug",
-        "access": "/var/log/xray/access.log",
-        "error": "/var/log/xray/error.log"
-    },
-    "inbounds": [
-        {
-            "port": 443,
-            "protocol": "vless",
-            "settings": {
-                "clients": [
-                    {
-                        "id": "$UUID",
-                        "flow": "xtls-rprx-vision"
-                    }
-                ],
-                "decryption": "none"
-            },
-            "streamSettings": {
-                "network": "tcp",
-                "security": "reality",
-                "realitySettings": {
-                    "dest": "www.apple.com:443",
-                    "serverNames": [
-                        "images.apple.com",
-                        "www.apple.com",
-                        "www.apple.com.cn"
-                    ],
-                    "privateKey": "$PRIVATE_KEY",
-                    "shortIds": [
-                        ""
-                    ]
-                }
-            },
-            "sniffing": {
-                "enabled": true,
-                "destOverride": [
-                    "http",
-                    "tls",
-                    "quic"
-                ],
-                "routeOnly": true
-            }
-        }
-    ],
-    "outbounds": [
-        {
-            "protocol": "freedom",
-            "tag": "direct"
-        },
-        {
-            "protocol": "blackhole",
-            "tag": "blocked"
-        }
-    ]
-}
+# Values interpolated below are generated locally or validated before use.
+generate_config() {
+    printf '{"log":{"loglevel":"warning"},"inbounds":['
+    if [[ "$MODE" != 2 ]]; then
+        cat <<EOF
+{"tag":"vless-reality","listen":"0.0.0.0","port":443,"protocol":"vless",
+ "settings":{"clients":[{"id":"$UUID","flow":"xtls-rprx-vision"}],"decryption":"none"},
+ "streamSettings":{"network":"tcp","security":"reality","realitySettings":{
+ "dest":"www.apple.com:443","serverNames":["www.apple.com"],
+ "privateKey":"$PRIVATE_KEY","shortIds":["$SHORT_ID"]}},
+ "sniffing":{"enabled":true,"destOverride":["http","tls","quic"],"routeOnly":true}}
 EOF
-
-check_status "XRay configuration created successfully." "Failed to create XRay configuration."
-
-# Step 5: Restart XRay service
-log "Restarting XRay service..."
-systemctl restart xray
-check_status "XRay service restarted successfully." "Failed to restart XRay service."
-
-# Check if XRay service is running
-log "Checking XRay service status..."
-if systemctl is-active --quiet xray; then
-    success "XRay service is running."
-else
-    error "XRay service is not running. Check the logs with 'journalctl -xeu xray'."
-    exit 1
-fi
-
-# Step 6: Enable BBR acceleration
-log "Enabling BBR acceleration..."
-
-# Check current TCP congestion control algorithm
-current_algorithm=$(sysctl -n net.ipv4.tcp_congestion_control)
-if [ "$current_algorithm" = "bbr" ]; then
-    success "BBR is already enabled."
-else
-    log "Enabling BBR..."
-    
-    # Check if the settings already exist in sysctl.conf to avoid duplication
-    if ! grep -q "net.core.default_qdisc=fq" /etc/sysctl.conf; then
-        echo "net.core.default_qdisc=fq" >> /etc/sysctl.conf
     fi
-    
-    if ! grep -q "net.ipv4.tcp_congestion_control=bbr" /etc/sysctl.conf; then
-        echo "net.ipv4.tcp_congestion_control=bbr" >> /etc/sysctl.conf
+    [[ "$MODE" != 3 ]] || printf ','
+    if [[ "$MODE" != 1 ]]; then
+        cat <<EOF
+{"tag":"vless-ws-tls","listen":"0.0.0.0","port":$WS_PORT,"protocol":"vless",
+ "settings":{"clients":[{"id":"$UUID"}],"decryption":"none"},
+ "streamSettings":{"network":"ws","security":"tls",
+ "wsSettings":{"path":"$WS_PATH"},
+ "tlsSettings":{"minVersion":"1.2","alpn":["http/1.1"],"certificates":[{
+ "certificateFile":"$TLS_DIR/origin.pem","keyFile":"$TLS_DIR/origin.key"}]}}}
+EOF
     fi
-    
-    # Apply the changes
-    sysctl -p
-    
-    # Verify BBR is now enabled
-    new_algorithm=$(sysctl -n net.ipv4.tcp_congestion_control)
-    if [ "$new_algorithm" = "bbr" ]; then
-        success "BBR has been enabled successfully."
+    printf '],"outbounds":[{"protocol":"freedom","tag":"direct"},{"protocol":"blackhole","tag":"blocked"}]}\n'
+}
+
+ws_link() {
+    printf 'vless://%s@%s:%s?encryption=none&security=tls&sni=%s&type=ws&host=%s&path=%s&alpn=http%%2F1.1#%s' \
+        "$UUID" "$DOMAIN" "$WS_PORT" "$DOMAIN" "$DOMAIN" "$(urlencode "$WS_PATH")" "$(urlencode "$REMARK-WS-CF")"
+}
+reality_link() {
+    printf 'vless://%s@%s:443?encryption=none&flow=xtls-rprx-vision&security=reality&sni=www.apple.com&fp=chrome&pbk=%s&sid=%s&type=tcp#%s' \
+        "$UUID" "$SERVER_IP" "$PUBLIC_KEY" "$SHORT_ID" "$(urlencode "$REMARK-REALITY")"
+}
+
+main() {
+    [[ $(id -u) == 0 ]] || die 'Please run with sudo bash.'
+    command -v apt-get >/dev/null || die 'This script supports Debian/Ubuntu only.'
+    command -v systemctl >/dev/null || die 'systemd is required.'
+    printf '\n1) VLESS + TCP + REALITY (443, direct only)\n2) VLESS + WS + TLS (443, Cloudflare)\n3) Both: REALITY 443 + WS/TLS 8443\n'
+    read -r -p 'Select [3]: ' MODE
+    MODE=${MODE:-3}
+    [[ "$MODE" =~ ^[123]$ ]] || die 'Choose 1, 2 or 3.'
+    WS_PORT=443
+    [[ "$MODE" != 3 ]] || WS_PORT=8443
+    CONFIG_DIR=/usr/local/etc/xray
+    CONFIG_FILE=$CONFIG_DIR/config.json
+    if [[ -e "$CONFIG_FILE" ]]; then
+        warning 'This replaces the complete Xray config and generates NEW client credentials.'
+        warning 'Old nodes/custom routing will stop working; a config backup will be kept.'
+        read -r -p 'Type REPLACE to continue: ' answer
+        [[ "$answer" == REPLACE ]] || die 'Cancelled; config unchanged.'
+    fi
+    if [[ "$MODE" != 1 ]]; then
+        read -r -p 'Cloudflare hostname (e.g. node.example.com): ' DOMAIN
+        valid_domain "$DOMAIN" || die 'Enter a hostname only, without https://, path or port.'
+        DOMAIN=${DOMAIN,,}
+        read -r -p 'Origin certificate PEM file on this VPS: ' CERT_SOURCE
+        read -r -p 'Origin private key PEM file on this VPS: ' KEY_SOURCE
+        [[ -f "$CERT_SOURCE" && -r "$CERT_SOURCE" && -f "$KEY_SOURCE" && -r "$KEY_SOURCE" ]] || die 'Certificate/key file missing or unreadable.'
+        read -r -p 'WebSocket path [random]: ' WS_PATH
+        [[ -z "$WS_PATH" ]] || valid_path "$WS_PATH" || die 'Path must start with / and contain only letters, digits, /, _ or -.'
+    fi
+    read -r -p "Node remark [$(hostname)-$(date +%m%d)]: " REMARK
+    REMARK=${REMARK:-$(hostname)-$(date +%m%d)}
+
+    log 'Installing required packages...'
+    apt-get update
+    apt-get install -y curl ca-certificates openssl qrencode iproute2
+    if [[ "$MODE" != 1 ]]; then
+        openssl x509 -in "$CERT_SOURCE" -noout -checkend 0 >/dev/null || die 'Certificate is invalid or expired.'
+        openssl x509 -in "$CERT_SOURCE" -noout -checkhost "$DOMAIN" | grep -q 'does match certificate' || die 'Certificate does not cover hostname.'
+        cert_pub=$(openssl x509 -in "$CERT_SOURCE" -pubkey -noout | openssl pkey -pubin -outform DER | openssl dgst -sha256)
+        key_pub=$(openssl pkey -in "$KEY_SOURCE" -passin pass: -pubout -outform DER | openssl dgst -sha256)
+        [[ "$cert_pub" == "$key_pub" ]] || die 'Certificate and private key do not match.'
+        WS_PATH=${WS_PATH:-/$(openssl rand -hex 12)}
+    fi
+
+    # Refuse to take ports from nginx, Apache or other services.
+    local port listeners
+    local -a ports=(443)
+    [[ "$MODE" != 3 ]] || ports+=(8443)
+    for port in "${ports[@]}"; do
+        listeners=$(ss -H -ltnp "sport = :$port")
+        if [[ -n "$listeners" ]] && printf '%s\n' "$listeners" | grep -v '"xray"' >/dev/null; then
+            die "Port $port is used by another service. No service has been stopped."
+        fi
+    done
+
+    WORK_DIR=$(mktemp -d /tmp/xray-setup.XXXXXXXX)
+    trap 'rm -f -- "$WORK_DIR/install-release.sh"; rmdir -- "$WORK_DIR" 2>/dev/null || true' EXIT
+    if [[ ! -x /usr/local/bin/xray ]]; then
+        log 'Downloading official Xray installer (upstream code runs as root)...'
+        curl -fSL --retry 3 --connect-timeout 15 --max-time 180 \
+            https://raw.githubusercontent.com/XTLS/Xray-install/main/install-release.sh \
+            -o "$WORK_DIR/install-release.sh"
+        bash "$WORK_DIR/install-release.sh" install
     else
-        warning "BBR could not be enabled. Current algorithm: $new_algorithm"
+        log 'Reusing installed Xray; not upgrading the existing core.'
     fi
+    XRAY=/usr/local/bin/xray
+    [[ -x "$XRAY" ]] || die 'Xray installation failed.'
+    systemctl cat xray >/dev/null || die 'xray.service not found.'
+    # shortcut: custom systemd config paths are unsupported; use the standard installer service.
+    service_cmd=$(systemctl show xray -p ExecStart --value)
+    [[ "$service_cmd" == *"-config $CONFIG_FILE"* && "$service_cmd" != *'-confdir'* ]] || die 'Custom Xray service command detected; integrate manually.'
+    SERVICE_USER=$(systemctl show xray -p User --value)
+    SERVICE_USER=${SERVICE_USER:-root}
+    SERVICE_GROUP=$(systemctl show xray -p Group --value)
+    SERVICE_GROUP=${SERVICE_GROUP:-$(id -gn "$SERVICE_USER")}
+    UUID=$("$XRAY" uuid)
+    [[ "$UUID" =~ ^[0-9a-fA-F-]{36}$ ]] || die 'Invalid generated UUID.'
+    if [[ "$MODE" != 2 ]]; then
+        keys=$("$XRAY" x25519)
+        PRIVATE_KEY=$(printf '%s\n' "$keys" | sed -nE 's/^(PrivateKey|Private key):[[:space:]]*([^[:space:]]+).*/\2/p')
+        PUBLIC_KEY=$(printf '%s\n' "$keys" | sed -nE 's/^(Password|PublicKey|Public key):[[:space:]]*([^[:space:]]+).*/\2/p' | head -n 1)
+        [[ "$PRIVATE_KEY" =~ ^[A-Za-z0-9_-]{43}$ && "$PUBLIC_KEY" =~ ^[A-Za-z0-9_-]{43}$ ]] || die 'Cannot parse Xray x25519 output.'
+        unset keys
+        SHORT_ID=$(openssl rand -hex 8)
+        SERVER_IP=$(curl -4 -fsS --connect-timeout 5 --max-time 10 https://api.ipify.org || true)
+        read -r -p "Public IPv4 for REALITY link [$SERVER_IP]: " ip_input
+        SERVER_IP=${ip_input:-$SERVER_IP}
+        [[ "$SERVER_IP" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || die 'A public IPv4 address is required.'
+        IFS=. read -r -a octets <<< "$SERVER_IP"
+        for octet in "${octets[@]}"; do
+            (( 10#$octet <= 255 )) || die 'Invalid IPv4 address.'
+        done
+    fi
+
+    install -d -m 755 "$CONFIG_DIR"
+    if [[ "$MODE" != 1 ]]; then
+        # Unique path keeps old certificates usable if config is rolled back.
+        TLS_DIR=$(mktemp -d "$CONFIG_DIR/tls.XXXXXXXX")
+        chown "root:$SERVICE_GROUP" "$TLS_DIR"
+        chmod 750 "$TLS_DIR"
+        install -m 640 -o root -g "$SERVICE_GROUP" "$CERT_SOURCE" "$TLS_DIR/origin.pem"
+        install -m 640 -o root -g "$SERVICE_GROUP" "$KEY_SOURCE" "$TLS_DIR/origin.key"
+    fi
+    CANDIDATE=$(mktemp "$CONFIG_DIR/config.new.XXXXXXXX")
+    generate_config > "$CANDIDATE"
+    chown "root:$SERVICE_GROUP" "$CANDIDATE"
+    chmod 640 "$CANDIDATE"
+    if ! "$XRAY" run -test -config "$CANDIDATE"; then
+        die "Config check failed. Live config unchanged. Candidate retained at $CANDIDATE"
+    fi
+    BACKUP=
+    if [[ -e "$CONFIG_FILE" ]]; then
+        BACKUP=$(mktemp "$CONFIG_DIR/config.backup.XXXXXXXX")
+        cp -p -- "$CONFIG_FILE" "$BACKUP"
+        log "Backup: $BACKUP"
+    fi
+    WAS_ACTIVE=false
+    systemctl is-active --quiet xray && WAS_ACTIVE=true
+    mv -f -- "$CANDIDATE" "$CONFIG_FILE"
+    log 'Restarting Xray...'
+    started=true
+    systemctl restart xray || started=false
+    sleep 2
+    if [[ "$started" != true ]] || ! systemctl is-active --quiet xray; then
+        if [[ -n "$BACKUP" ]]; then
+            cp -p -- "$BACKUP" "$CONFIG_FILE"
+            if [[ "$WAS_ACTIVE" == true ]]; then
+                systemctl restart xray || warning 'Old config restored, but service still cannot start.'
+            else
+                systemctl stop xray || true
+            fi
+        else
+            mv -- "$CONFIG_FILE" "$CONFIG_FILE.failed-$(date +%s)"
+            systemctl stop xray || true
+        fi
+        die 'New config failed to start; rolled back. Check: journalctl -u xray -n 50 --no-pager'
+    fi
+    systemctl enable xray
+
+    # Keep BBR optional: lack of kernel support must not fail a working setup.
+    read -r -p 'Enable BBR if supported? [y/N]: ' enable_bbr
+    if [[ "$enable_bbr" =~ ^[Yy]$ ]]; then
+        modprobe tcp_bbr 2>/dev/null || true
+        if sysctl -n net.ipv4.tcp_available_congestion_control | grep -qw bbr; then
+            printf 'net.core.default_qdisc=fq\nnet.ipv4.tcp_congestion_control=bbr\n' > /etc/sysctl.d/99-xray-bbr.conf
+            sysctl -p /etc/sysctl.d/99-xray-bbr.conf || warning 'Could not apply BBR settings.'
+        else
+            warning 'Kernel does not support BBR; skipped.'
+        fi
+    fi
+    RESULT_DIR=$(mktemp -d /root/xray-client.XXXXXXXX)
+    if [[ "$MODE" != 2 ]]; then
+        reality_link > "$RESULT_DIR/reality.txt"
+        printf '\nREALITY (direct IP, NOT Cloudflare):\n%s\n' "$(cat "$RESULT_DIR/reality.txt")"
+        qrencode -t ANSIUTF8 < "$RESULT_DIR/reality.txt" || warning 'Terminal QR rendering failed.'
+        qrencode -s 10 -o "$RESULT_DIR/reality.png" < "$RESULT_DIR/reality.txt" || warning 'QR PNG failed.'
+    fi
+    if [[ "$MODE" != 1 ]]; then
+        ws_link > "$RESULT_DIR/ws-cf.txt"
+        printf '\nWS + TLS (Cloudflare):\n%s\n' "$(cat "$RESULT_DIR/ws-cf.txt")"
+        qrencode -t ANSIUTF8 < "$RESULT_DIR/ws-cf.txt" || warning 'Terminal QR rendering failed.'
+        qrencode -s 10 -o "$RESULT_DIR/ws-cf.png" < "$RESULT_DIR/ws-cf.txt" || warning 'QR PNG failed.'
+        printf '\nCF: proxied A record -> VPS IPv4; SSL Full (strict); WebSockets ON.\n'
+        printf 'Allow TCP %s in VPS firewall AND provider security group.\n' "$WS_PORT"
+        printf 'Host/SNI: %s | WS path: %s | Flow: EMPTY\n' "$DOMAIN" "$WS_PATH"
+        warning 'No firewall or Cloudflare account settings were changed. Origin CA requires the orange-cloud proxy.'
+    fi
+    log "Local Xray service running. Private client links/QR codes: $RESULT_DIR"
+    warning 'Cloudflare end-to-end connectivity has NOT been verified. REALITY cannot rescue a blocked direct IP.'
+    printf 'Status: systemctl status xray\nLogs: journalctl -u xray -n 50 --no-pager\n'
+}
+
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+    main "$@"
 fi
-
-# Check for qrencode
-log "Checking for qrencode..."
-if ! command -v qrencode &> /dev/null; then
-    warning "qrencode is not installed. Installing..."
-    apt-get update && apt-get install -y qrencode
-    check_status "qrencode installed successfully." "Failed to install qrencode."
-fi
-
-# Generate VLESS URL
-SERVER_IP=$(curl -s ifconfig.me)
-# 生成默认备注名并获取用户输入
-DEFAULT_REMARK=$(hostname)-$(date +%m%d)
-echo -e "${BLUE}Enter a custom remark name for your VLESS configuration${NC}"
-echo -e "${YELLOW}(Press Enter to use default: $DEFAULT_REMARK)${NC}: "
-read USER_REMARK
-
-# 使用默认值或用户输入
-REMARK=${USER_REMARK:-$DEFAULT_REMARK}
-log "Using remark: $REMARK"
-
-# URL encode the remark
-ENCODED_REMARK=$(echo -n "$REMARK" | xxd -plain | tr -d '\n' | sed 's/\(..\)/%\1/g')
-
-# Create VLESS link
-VLESS_LINK="vless://$UUID@$SERVER_IP:443?encryption=none&flow=xtls-rprx-vision&security=reality&sni=www.apple.com&fp=chrome&pbk=$PUBLIC_KEY&spx=%2F&type=tcp&headerType=none#$ENCODED_REMARK"
-
-# Generate QR code and display it in terminal
-log "Generating QR code and displaying in terminal..."
-echo -n "$VLESS_LINK" | qrencode -t ANSI
-check_status "QR code displayed successfully" "Failed to generate QR code."
-
-# Save QR code to file as well for reference
-QRCODE_FILE="/root/xray_vless_qrcode.png"
-echo -n "$VLESS_LINK" | qrencode -s 10 -o "$QRCODE_FILE"
-log "QR code also saved to $QRCODE_FILE"
-
-# Final summary and connection information
-log "XRay installation and configuration completed successfully."
-echo ""
-echo "==== XRay Connection Information ===="
-echo "Protocol: VLESS"
-echo "Server Address: $SERVER_IP"
-echo "Port: 443"
-echo "UUID: $UUID"
-echo "Flow: xtls-rprx-vision"
-echo "Network: tcp"
-echo "Security: reality"
-echo "Server Names: images.apple.com, www.apple.com, www.apple.com.cn"
-echo "Destination: www.apple.com:443"
-echo "Public Key: $PUBLIC_KEY"
-echo "===================================="
-echo ""
-echo "VLESS Link:"
-echo "$VLESS_LINK"
-echo ""
-echo "QR Code has been saved to: $QRCODE_FILE"
-echo ""
-echo "To check service status: sudo service xray status"
-echo "To restart service: sudo service xray restart"
-echo "Log files are located at: /var/log/xray/"
-echo ""
-success "Setup completed successfully!"
