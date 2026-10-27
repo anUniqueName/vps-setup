@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Debian/Ubuntu + systemd. Run as a saved file, not via a pipe.
+# Debian/Ubuntu + systemd. Interactive terminal required, including when piped.
 set -Eeuo pipefail
 umask 077
 
@@ -228,5 +228,9 @@ main() {
 }
 
 if [[ "${BASH_SOURCE[0]:-$0}" == "$0" ]]; then
-    main "$@"
+    if ! (: </dev/tty) 2>/dev/null; then
+        die 'An interactive terminal is required. Run from an SSH terminal, not a background job.'
+    fi
+    # Keep menu answers separate from the script stream in curl ... | sudo bash.
+    main "$@" </dev/tty
 fi
