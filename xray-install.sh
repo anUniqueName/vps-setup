@@ -135,7 +135,7 @@ main() {
     if [[ "$MODE" != 2 ]]; then
         keys=$("$XRAY" x25519)
         PRIVATE_KEY=$(printf '%s\n' "$keys" | sed -nE 's/^(PrivateKey|Private key):[[:space:]]*([^[:space:]]+).*/\2/p')
-        PUBLIC_KEY=$(printf '%s\n' "$keys" | sed -nE 's/^(Password|PublicKey|Public key):[[:space:]]*([^[:space:]]+).*/\2/p' | head -n 1)
+        PUBLIC_KEY=$(printf '%s\n' "$keys" | sed -nE 's/^(Password \(PublicKey\)|Password|PublicKey|Public key):[[:space:]]*([^[:space:]]+).*/\2/p' | head -n 1)
         [[ "$PRIVATE_KEY" =~ ^[A-Za-z0-9_-]{43}$ && "$PUBLIC_KEY" =~ ^[A-Za-z0-9_-]{43}$ ]] || die 'Cannot parse Xray x25519 output.'
         unset keys
         SHORT_ID=$(openssl rand -hex 8)
