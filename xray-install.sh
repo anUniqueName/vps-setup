@@ -227,7 +227,6 @@ main() {
     printf 'Status: systemctl status xray\nLogs: journalctl -u xray -n 50 --no-pager\n'
 }
 
-if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
 if [[ "${BASH_SOURCE[0]:-$0}" == "$0" ]]; then
     main "$@"
 fi
