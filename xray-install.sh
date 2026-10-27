@@ -162,7 +162,7 @@ main() {
     generate_config > "$CANDIDATE"
     chown "root:$SERVICE_GROUP" "$CANDIDATE"
     chmod 640 "$CANDIDATE"
-    if ! "$XRAY" run -test -config "$CANDIDATE"; then
+    if ! "$XRAY" run -test -format json -config "$CANDIDATE"; then
         die "Config check failed. Live config unchanged. Candidate retained at $CANDIDATE"
     fi
     BACKUP=
