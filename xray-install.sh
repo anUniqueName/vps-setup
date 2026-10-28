@@ -158,7 +158,7 @@ main() {
         install -m 640 -o root -g "$SERVICE_GROUP" "$CERT_SOURCE" "$TLS_DIR/origin.pem"
         install -m 640 -o root -g "$SERVICE_GROUP" "$KEY_SOURCE" "$TLS_DIR/origin.key"
     fi
-    CANDIDATE=$(mktemp "$CONFIG_DIR/config.new.XXXXXXXX")
+    CANDIDATE=$(mktemp --suffix=.json "$CONFIG_DIR/config.new.XXXXXXXX")
     generate_config > "$CANDIDATE"
     chown "root:$SERVICE_GROUP" "$CANDIDATE"
     chmod 640 "$CANDIDATE"
